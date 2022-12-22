@@ -8,6 +8,7 @@
 #include <atPool.h>
 #include <DirectXMath.h>
 #include <CrossBuildRuntime.h>
+#include <MinHook.h>
 
 #define DECLARE_ACCESSOR(x) \
 	decltype(impl.m2060.x)& x()        \
@@ -303,8 +304,333 @@ static int GetInteriorRoomIdByHash(CMloModelInfo* arch, int searchHash)
 	return -1;
 }
 
+static void (*g_origsub_14034F024)(__int64 a1, void* envGroup, uint64_t a3, float* a4, float* a5);
+
+static void sub_14034F024(__int64 a1, void* envGroup, uint64_t a3, float* a4, float* a5)
+{
+	return g_origsub_14034F024(a1, envGroup, a3, a4, a5);
+}
+
+#include <shared_mutex>
+#include <map>
+#include <ScriptSerialization.h>
+
+template<std::size_t Index, typename ReturnType, typename... Args>
+inline ReturnType call_virtual(void* instance, Args... args)
+{
+	using Fn = ReturnType(__thiscall*)(void*, Args...);
+
+	auto function = (*reinterpret_cast<Fn**>(instance))[Index];
+	return function(instance, args...);
+}
+
+struct CPedFactory
+{
+	virtual ~CPedFactory() = 0;
+
+	CPed* localPlayerPed;
+};
+
+static CPedFactory** g_pedFactory;
+
+struct VirtualBase
+{
+	virtual ~VirtualBase()
+	{
+	}
+};
+
+struct VirtualDerivative : public VirtualBase
+{
+	virtual ~VirtualDerivative() override
+	{
+	}
+};
+
+struct SoundRoutingEntry
+{
+	float routeEndX;
+	float routeEndY;
+	float routeEndZ;
+
+	float routeStartX;
+	float routeStartY;
+	float routeStartZ;
+
+	float occlusionFactor;
+
+	std::string envGroupName;
+	std::string audEntName;
+
+	uint64_t envGroup;
+
+	struct SoundRoutingHop
+	{
+		float x;
+		float y;
+		float z;
+
+		float occlusionFactor;
+		float distance;
+		MSGPACK_DEFINE_ARRAY(x, y, z, occlusionFactor, distance)
+	};
+	std::vector<SoundRoutingHop> hops;
+
+	MSGPACK_DEFINE_ARRAY(routeEndX, routeEndY, routeEndZ, routeStartX, routeStartY, routeStartZ, occlusionFactor, envGroupName, audEntName, envGroup, hops)
+};
+std::vector<SoundRoutingEntry> g_soundRoutingEntries;
+
+class __struct_v9
+{
+public:
+	DirectX::XMFLOAT4 vec1; //0x0000
+	DirectX::XMFLOAT4 vec2; //0x0010
+	DirectX::XMFLOAT4 vec3; //0x0020
+	__struct_v9* nextInPath; //0x0030
+	DirectX::XMFLOAT4X4* portalCoords; //0x0038
+	uint32_t occlusionHash; //0x0040
+	uint32_t roomIndex; //0x0044
+	float audCurveFactor; //0x0048
+	float occlusionFactor; //0x004C
+	float distance; //0x0050
+	float N00002B20; //0x0054
+	char pad_0058[4]; //0x0058
+	bool processedToEnd; //0x005C
+	char pad_005D[3]; //0x005D
+	atArray<__struct_v9> linkedNodes;//0x0060
+}; //Size: 0x0070
+constexpr int dsd = sizeof(__struct_v9);
+
+std::map<int8_t*, const char*> g_EnvironmentGroups;
+static int8_t* (*g_orig__naEnvironmentGroup__Allocate)(const char* name);
+static int8_t* naEnvironmentGroup__Allocate(const char* name)
+{
+	auto envGroup = g_orig__naEnvironmentGroup__Allocate(name);
+	g_EnvironmentGroups.insert({ envGroup, name });
+
+	return envGroup;
+}
+
+static void (*g_orig__naEnvironmentGroupManager__Update)(__int64 a1, __int64 envGroups, int MaxEnvironmentGroupsToUpdate, unsigned int gameTime);
+static void naEnvironmentGroupManager__Update(__int64 a1, __int64 envGroups, int MaxEnvironmentGroupsToUpdate, unsigned int gameTime)
+{
+	g_orig__naEnvironmentGroupManager__Update(a1, envGroups, MaxEnvironmentGroupsToUpdate, gameTime);
+}
+
+static __int64 (*g_origsub_1403BC95C)(__int64 a1, __struct_v9* a2, uint64_t envGroup, Vector3* a4);
+static __int64 sub_1403BC95C(__int64 a1, __struct_v9* a2, uint64_t envGroup, Vector3* a4)
+{
+	__int64 retval = g_origsub_1403BC95C(a1, a2, envGroup, a4);
+
+	if (g_pedFactory && (*g_pedFactory)->localPlayerPed)
+	{
+		void* localAudioEntity = call_virtual<22, void*>((*g_pedFactory)->localPlayerPed);
+		uint64_t localEnvGroup = call_virtual<19, uint64_t, bool>(localAudioEntity, false);
+		if (localEnvGroup == envGroup)
+			return retval;
+	}
+
+	if (a2->processedToEnd && (a4->x != 0.0f && a4->y != 0.0f && a4->z != 0.0f))
+	{
+		const char* envGroupName = "unkown envGroup";
+		const char* audEntName = "unkown audEntity";
+
+		rage::fwInteriorLocation interiorLocation;
+		float audEntityPos[4] = { 0 };
+
+		if (envGroup)
+		{
+			auto it = g_EnvironmentGroups.find((int8_t*)envGroup);
+			if (it != g_EnvironmentGroups.end())
+				envGroupName = it->second;
+
+			interiorLocation = *(rage::fwInteriorLocation*)(envGroup + 0xF4);
+			if (*(int8_t*)(envGroup + 0x58) && *(int8_t**)(envGroup + 0x58))
+			{
+				int8_t* audEntity = *(int8_t**)(envGroup + 0x58);
+				if (audEntity != nullptr)
+				{
+					call_virtual<10, uint64_t, void*>(audEntity, (void*)&audEntityPos[0]);
+
+					VirtualBase* self = (VirtualBase*)audEntity;
+					audEntName = typeid(*self).name();
+				}
+			}
+		}
+
+		/*if (audEntityPos[0] == 0.0f && audEntityPos[1] == 0.0f && audEntityPos[2] == 0.0f)
+			return retval;*/
+
+		//*(uint8_t*)(a2 + 0x60)
+		std::vector<SoundRoutingEntry::SoundRoutingHop> hops;
+		std::vector<std::pair<uint8_t, __struct_v9*>> routes;
+		auto recursive_path_finder = [a2, &routes, &interiorLocation](__struct_v9* root, auto self) -> void
+		{
+			for (uint16_t i = 0; i < root->linkedNodes.GetCount(); i++)
+			{
+				__struct_v9* child = &root->linkedNodes.Get(i);
+				if (child->nextInPath != root)
+					continue;
+
+				if (child->occlusionFactor > a2->occlusionFactor)
+					continue;
+
+				/*if (floor(child->distance + 0.5f) > floor(a2->distance + 0.5f))
+					continue;*/
+
+				__struct_v9* child2 = child;
+				uint8_t length = 0;
+
+				while (true)
+				{
+					bool isValidNode = child->roomIndex <= 32 && child->occlusionFactor <= 1.0f && child->nextInPath && child->nextInPath != child;
+					if (isValidNode)
+					{
+						child = child->nextInPath;
+						length++;
+					}
+					else
+						break;
+
+					//Todo: Figure out the actual amount of max hops 
+					if (length > 8)
+						break;
+				}
+				if (child != a2)
+					continue;
+
+				bool isCorrectRoom = !interiorLocation.IsPortal() && interiorLocation.GetRoomIndex() == child2->roomIndex;
+				if (isCorrectRoom)
+					routes.push_back({ length, child2 });
+
+				self(child2, self);
+			}
+		};
+		recursive_path_finder(a2, recursive_path_finder);
+
+		if (routes.size())
+		{
+			std::sort(routes.begin(), routes.end(), [](std::pair<uint8_t, __struct_v9*>& lhs, std::pair<uint8_t, __struct_v9*>& rhs)
+			{
+				__struct_v9* step = lhs.second;
+				float lhsDistance = 0.0f;
+				while (step && step->nextInPath != nullptr)
+				{
+					lhsDistance += step->occlusionFactor;
+					step = step->nextInPath;
+				}
+
+				step = rhs.second;
+				float rhsDistance = 0.0f;
+				while (step && step->nextInPath != nullptr)
+				{
+					rhsDistance += step->occlusionFactor;
+					step = step->nextInPath;
+				}
+
+				return lhsDistance < rhsDistance;
+			});
+
+			__struct_v9* step = routes[0].second;
+			while (step)
+			{
+				hops.push_back({ step->vec2.x, step->vec2.y, step->vec2.z, step->occlusionFactor, step->distance });
+				step = step->nextInPath;
+			}
+		}		
+
+		/*std::vector <std::pair<uint64_t, std::vector<SoundRoutingEntry::SoundRoutingHop>>> hops = {};
+
+		auto recursive_path_finder = [&hops, &interiorLocation](__struct_v9* root, auto self) -> bool
+		{
+			if (!root->processedToEnd)
+				return false;
+
+			for (uint16_t i = 0; i < root->linkedNodes.GetCount(); i++)
+			{
+				__struct_v9* it = &root->linkedNodes.Get(i);
+				if (!interiorLocation.IsPortal() && interiorLocation.GetRoomIndex() == it->roomIndex && std::find(hops))
+				{
+					std::vector<SoundRoutingEntry::SoundRoutingHop> path = {};
+					uint64_t startNode = (uint64_t)it;
+					while (it->nextInPath)
+					{
+						path.push_back({ it->vec1.x, it->vec1.y, it->vec1.z, it->occlusionFactor, it->distance });
+
+						it = it->nextInPath;
+					}
+
+					hops.push_back({ startNode, path });
+				}
+				if (self(it, self))
+					return true;
+			}
+			return false;
+		};
+		recursive_path_finder(a2, recursive_path_finder);
+
+		std::vector<SoundRoutingEntry::SoundRoutingHop>* bestPath;
+		size_t shortestPath = 99;
+		for (auto& it : hops)
+		{
+			if (it.second.size() < shortestPath)
+			{
+				bestPath = &it.second;
+				shortestPath = it.second.size();
+			}
+		}*/
+
+		auto entry = std::find_if(g_soundRoutingEntries.begin(), g_soundRoutingEntries.end(), [envGroup](const SoundRoutingEntry& entry)
+		{
+			return bool(entry.envGroup == envGroup);
+		});
+
+		if (entry != g_soundRoutingEntries.end())
+		{
+			*entry = { a4->x, a4->y, a4->z, audEntityPos[0], audEntityPos[1], audEntityPos[2], a2->occlusionFactor, envGroupName, audEntName, envGroup, hops };
+		}
+		else
+			g_soundRoutingEntries.push_back({ a4->x, a4->y, a4->z, audEntityPos[0], audEntityPos[1], audEntityPos[2], a2->occlusionFactor, envGroupName, audEntName, envGroup, hops });
+	}
+
+	return retval;
+}
+
 static HookFunction initFunction([]()
 {
+	{
+		auto location = hook::get_call(hook::get_pattern("E8 ? ? ? ? 84 C0 74 3C F3 0F 10 4D"));
+		MH_Initialize();
+		MH_CreateHook(location, sub_14034F024, (void**)&g_origsub_14034F024);
+		MH_EnableHook(location);
+
+		location = hook::get_call(hook::get_pattern("E8 ? ? ? ? 40 38 BE ? ? ? ? 0F 84 ? ? ? ? F3 0F 10 8E"));
+		MH_CreateHook(location, sub_1403BC95C, (void**)&g_origsub_1403BC95C);
+		MH_EnableHook(location);
+
+		location = hook::get_call(hook::get_pattern("E8 ? ? ? ? 48 8B F8 48 85 C0 74 73 F3"));
+		MH_CreateHook(location, naEnvironmentGroup__Allocate, (void**)&g_orig__naEnvironmentGroup__Allocate);
+		MH_EnableHook(location);
+
+		location = hook::get_pattern("48 8D 0D ? ? ? ? 41 8B F1 41 8B D8 48 8B EA E8 ? ? ? ? 84 C0", -0x1A);
+		MH_CreateHook(location, naEnvironmentGroupManager__Update, (void**)&g_orig__naEnvironmentGroupManager__Update);
+		MH_EnableHook(location);
+
+		g_pedFactory = hook::get_address<decltype(g_pedFactory)>(hook::get_pattern("E8 ? ? ? ? 48 8B 05 ? ? ? ? 48 8B 58 08 48 8B CB E8", 8));
+
+		fx::ScriptEngine::RegisterNativeHandler("GET_OCCLUSION_SOUND_SOURCES", [=](fx::ScriptContext& context)
+		{
+			context.SetResult(fx::SerializeObject(g_soundRoutingEntries));
+			return true;
+		});
+
+		fx::ScriptEngine::RegisterNativeHandler("RESET_OCCLUSION_SOUND_SOURCES", [=](fx::ScriptContext& context)
+		{
+			g_soundRoutingEntries.clear();
+			return true;
+		});
+	}
+
 	{
 		auto location = hook::get_pattern<char>("BA A1 85 94 52 41 B8 01", 0x34);
 
