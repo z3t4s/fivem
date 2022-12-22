@@ -81,6 +81,24 @@ cd ../../
 
 chroot $PWD/alpine/ /bin/sh /src/code/tools/ci/build_server_2.sh
 
+# clean up any leftover processes
+REALPATH=$(realpath $PWD/alpine)
+
+for PROC in /proc/*; do
+	if [ -d "$PROC/root" ]; then
+		ROOT=$(realpath $PROC/root)
+
+		if [ "$ROOT" == "$REALPATH" ]; then
+			echo "Killing leftover process $PROC"
+			kill -9 $(basename $PROC) || true
+		fi
+	fi
+done
+
+# sleep a bit (when doing diagnostics, it seems the leftover processes were dead by now)
+sleep 10
+
+# unmount the chroot
 umount $PWD/alpine/dev
 umount $PWD/alpine/sys
 umount $PWD/alpine/proc

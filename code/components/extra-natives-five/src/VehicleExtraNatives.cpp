@@ -75,6 +75,30 @@ struct VehicleXenonLightsColor
 	}
 };
 
+struct VehicleDashboardData
+{
+	float RPM;
+	float speed;
+	float fuel;
+	float temp;
+	float vacuum;
+	float boost;
+	float waterTemp;
+	float oilTemp;
+	float oilPressure;
+	char _pad[0x3F]; // aircraft data
+	bool indicator_left;
+	bool indicator_right;
+	bool handbrakeLight;
+	bool engineLight;
+	bool ABSLight;
+	bool gasLight;
+	bool oilLight;
+	bool headlights;
+	bool highBeam;
+	bool batteryLight;
+};
+
 static std::unordered_set<fwEntity*> g_skipRepairVehicles{};
 
 static std::vector<FlyThroughWindscreenParam> g_flyThroughWindscreenParams{};
@@ -255,6 +279,8 @@ static bool* g_trainsForceDoorsOpen;
 static int TrainDoorCountOffset;
 static int TrainDoorArrayPointerOffset;
 
+static int VehicleRepairMethodVtableOffset;
+
 static std::unordered_set<fwEntity*> g_deletionTraces;
 static std::unordered_set<void*> g_deletionTraces2;
 
@@ -394,6 +420,19 @@ static void OverrideVehicleXenonColor(CVehicle* vehicle, float* color, uint32_t*
 	}
 }
 
+static VehicleDashboardData g_DashboardData{};
+void (*g_origDashboardHandler)(void* modelInfo, VehicleDashboardData* data);
+
+static void DashboardHandler(void* modelInfo, VehicleDashboardData* data)
+{
+	if (data)
+	{
+		g_DashboardData = *data;
+
+		g_origDashboardHandler(modelInfo, data);
+	}
+}
+
 TrainDoor* GetTrainDoor(fwEntity* train, uint32_t index)
 {
 	return &(*((TrainDoor**)(((char*)train) + TrainDoorArrayPointerOffset)))[index];
@@ -423,14 +462,15 @@ static HookFunction initFunction([]()
 		WheelSurfaceMaterialOffset = *hook::get_pattern<uint32_t>("48 8B 4A 10 0F 28 CF F3 0F 59 05", -4);
 		WheelHealthOffset = *hook::get_pattern<uint32_t>("75 24 F3 0F 10 ? ? ? 00 00 F3 0F", 6);
 		LightMultiplierGetOffset = *hook::get_pattern<uint32_t>("00 00 48 8B CE F3 0F 59 ? ? ? 00 00 F3 41", 9);
+		VehicleRepairMethodVtableOffset = *hook::get_pattern<uint32_t>("C1 E8 19 A8 01 74 ? 48 8B 81", -14);
 	}
 
 	if (xbr::IsGameBuildOrGreater<2372>())
 	{
-		auto location = hook::get_pattern<char>("49 3B F6 75 ? F3 41 0F 10 0E 41 B1 01");
+		auto location = hook::get_pattern<char>("89 87 ? ? ? ? 48 3B F5 74 2C 48 8B 6D 00 48 8B 0E 48");
 
-		FuelLevelOffset = *(uint32_t*)(location + 64);
-		OilLevelOffset = *(uint32_t*)(location + 76);
+		FuelLevelOffset = *(uint32_t*)(location - 16);
+		OilLevelOffset = *(uint32_t*)(location - 4);
 	}
 	else
 	{
@@ -506,10 +546,12 @@ static HookFunction initFunction([]()
 
 	{
 		char* location;
-		if (xbr::IsGameBuildOrGreater<2060>()) {
+		if (xbr::IsGameBuildOrGreater<2060>())
+		{
 			location = hook::get_pattern<char>("0F 2F ? ? ? 00 00 0F 97 C0 EB ? D1");
 		}
-		else {
+		else
+		{
 			location = hook::get_pattern<char>("0F 2F ? ? ? 00 00 0F 97 C0 EB DA");
 		}
 		WheelSteeringAngleOffset = (*(uint32_t*)(location + 3));
@@ -667,6 +709,61 @@ static HookFunction initFunction([]()
 
 	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_ENGINE_TEMPERATURE", std::bind(readVehicleMemory<float, &EngineTempOffset>, _1, "GET_VEHICLE_ENGINE_TEMPERATURE"));
 	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_ENGINE_TEMPERATURE", std::bind(writeVehicleMemory<float, &EngineTempOffset>, _1, "SET_VEHICLE_ENGINE_TEMPERATURE"));
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_RPM", [](fx::ScriptContext& context)
+	{
+		context.SetResult<float>(g_DashboardData.RPM);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_FUEL", [](fx::ScriptContext& context)
+	{
+		context.SetResult<float>(g_DashboardData.fuel);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_TEMP", [](fx::ScriptContext& context)
+	{
+		context.SetResult<float>(g_DashboardData.temp);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_VACUUM", [](fx::ScriptContext& context)
+	{
+		context.SetResult<float>(g_DashboardData.vacuum);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_BOOST", [](fx::ScriptContext& context)
+	{
+		context.SetResult<float>(g_DashboardData.boost);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_WATER_TEMP", [](fx::ScriptContext& context)
+	{
+		context.SetResult<float>(g_DashboardData.waterTemp);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_OIL_PRESSURE", [](fx::ScriptContext& context)
+	{
+		context.SetResult<float>(g_DashboardData.oilPressure);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_OIL_TEMP", [](fx::ScriptContext& context)
+	{
+		context.SetResult<float>(g_DashboardData.oilTemp);
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_LIGHTS", [](fx::ScriptContext& context)
+	{
+		int lightState = (g_DashboardData.indicator_left << 0)
+						 | (g_DashboardData.indicator_right << 1)
+						 | (g_DashboardData.handbrakeLight << 2)
+						 | (g_DashboardData.engineLight << 3)
+						 | (g_DashboardData.ABSLight << 4)
+						 | (g_DashboardData.gasLight << 5)
+						 | (g_DashboardData.oilLight << 6)
+						 | (g_DashboardData.headlights << 7)
+						 | (g_DashboardData.highBeam << 8)
+						 | (g_DashboardData.batteryLight << 9);
+		context.SetResult<int>(lightState);
+	});
 
 	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_SUSPENSION_HEIGHT", [](fx::ScriptContext& context)
 	{
@@ -1200,7 +1297,7 @@ static HookFunction initFunction([]()
 			jne("skiprepair");
 			pop(rax);
 			sub(rsp, 0x28);
-			AppendInstr(jitasm::InstrID::I_CALL, 0xFF, 0, jitasm::Imm8(2), qword_ptr[rax + (xbr::IsGameBuildOrGreater<2189>() ? 0x5D8 : 0x5D0)]);
+			AppendInstr(jitasm::InstrID::I_CALL, 0xFF, 0, jitasm::Imm8(2), qword_ptr[rax + VehicleRepairMethodVtableOffset]);
 			add(rsp, 0x28);
 			ret();
 			L("skiprepair");
@@ -1446,6 +1543,7 @@ static HookFunction initFunction([]()
 	MH_CreateHook(hook::get_pattern("E8 ? ? ? ? 8A 83 DA 00 00 00 24 0F 3C 02", -0x32), DeleteVehicleWrap, (void**)&g_origDeleteVehicle);
 	MH_CreateHook(hook::get_pattern("80 7A 4B 00 45 8A F9", -0x1D), DeleteNetworkCloneWrap, (void**)&g_origDeleteNetworkClone);
 	MH_CreateHook(hook::get_call(hook::get_pattern("74 22 48 8B CA E8 ? ? ? ? 84 C0 74 16", 5)), CanPedStandOnVehicleWrap, (void**)&g_origCanPedStandOnVehicle);
+	MH_CreateHook(hook::get_call(hook::get_pattern("48 8B 4F 20 48 8D 54 24 ? E8", 0x9)), DashboardHandler, (void**)&g_origDashboardHandler);
 	MH_EnableHook(MH_ALL_HOOKS);
 });
 
